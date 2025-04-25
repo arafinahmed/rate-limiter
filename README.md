@@ -32,8 +32,9 @@ rate-limiter/
 │   │   └── ratelimiter.go # Rate limiter interface and implementations
 │   └── server/
 │       └── server.go      # HTTP server setup and handlers
-├── go.mod
-├── go.sum
+├── docker-compose.yml     # Docker Compose configuration
+├── Dockerfile             # Dockerfile for building the application
+├── go.mod                 # Go module configuration
 └── README.md              # This file
 ```
 
