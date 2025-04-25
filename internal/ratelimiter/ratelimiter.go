@@ -1,9 +1,6 @@
-package main
+package ratelimiter
 
 import (
-	"fmt"
-	"log"
-	"net/http"
 	"sync"
 	"time"
 )
@@ -12,6 +9,8 @@ import (
 type RateLimiter interface {
 	Allow(ip string) bool
 }
+
+// --- Token Bucket Implementation ---
 
 // TokenBucket represents a token bucket for rate limiting
 type TokenBucket struct {
@@ -24,6 +23,7 @@ type TokenBucket struct {
 type TokenBucketRateLimiter struct {
 	buckets map[string]*TokenBucket
 	mu      sync.Mutex
+	capacity int // Store capacity for new buckets
 	rate    time.Duration // Time between token additions
 }
 
@@ -31,6 +31,7 @@ type TokenBucketRateLimiter struct {
 func NewTokenBucketRateLimiter(capacity int, rate time.Duration) *TokenBucketRateLimiter {
 	rl := &TokenBucketRateLimiter{
 		buckets: make(map[string]*TokenBucket),
+		capacity: capacity,
 		rate:    rate,
 	}
 	go rl.cleanup()
@@ -45,8 +46,8 @@ func (rl *TokenBucketRateLimiter) getBucket(ip string) *TokenBucket {
 	bucket, exists := rl.buckets[ip]
 	if !exists {
 		bucket = &TokenBucket{
-			tokens:     10, // Start with full bucket
-			capacity:   10,
+			tokens:     rl.capacity, // Start with full bucket based on config
+			capacity:   rl.capacity,
 			lastRefill: time.Now(),
 		}
 		rl.buckets[ip] = bucket
@@ -65,21 +66,15 @@ func (rl *TokenBucketRateLimiter) refill(bucket *TokenBucket) {
 	}
 }
 
-// min returns the smaller of two integers
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // cleanup removes buckets that haven't been used in a while
 func (rl *TokenBucketRateLimiter) cleanup() {
 	for {
 		time.Sleep(5 * time.Minute)
 		rl.mu.Lock()
+		now := time.Now()
 		for ip, bucket := range rl.buckets {
-			if time.Since(bucket.lastRefill) > 10*time.Minute {
+			// Clean up if not refilled in 10 minutes
+			if now.Sub(bucket.lastRefill) > 10*time.Minute {
 				delete(rl.buckets, ip)
 			}
 		}
@@ -90,13 +85,19 @@ func (rl *TokenBucketRateLimiter) cleanup() {
 // Allow checks if a request is allowed, consuming a token if possible
 func (rl *TokenBucketRateLimiter) Allow(ip string) bool {
 	bucket := rl.getBucket(ip)
+	// Need lock here as refill and token decrement modify bucket state
+	rl.mu.Lock()
 	rl.refill(bucket)
 	if bucket.tokens > 0 {
 		bucket.tokens--
+		rl.mu.Unlock()
 		return true
 	}
+	rl.mu.Unlock()
 	return false
 }
+
+// --- Fixed Window Counter Implementation ---
 
 // FixedWindowCounter represents a counter for a fixed time window
 type FixedWindowCounter struct {
@@ -144,8 +145,10 @@ func (rl *FixedWindowRateLimiter) cleanup() {
 	for {
 		time.Sleep(5 * time.Minute)
 		rl.mu.Lock()
+		now := time.Now()
 		for ip, bucket := range rl.buckets {
-			if time.Since(bucket.windowStart) > 2*rl.windowSize {
+			// Clean up if the window started more than 2 window sizes ago
+			if now.Sub(bucket.windowStart) > 2*rl.windowSize {
 				delete(rl.buckets, ip)
 			}
 		}
@@ -175,6 +178,8 @@ func (rl *FixedWindowRateLimiter) Allow(ip string) bool {
 	}
 	return false
 }
+
+// --- Sliding Window Log Implementation ---
 
 // SlidingWindowLog represents a log of request timestamps
 type SlidingWindowLog struct {
@@ -222,8 +227,10 @@ func (rl *SlidingWindowLogRateLimiter) cleanup() {
 	for {
 		time.Sleep(5 * time.Minute)
 		rl.mu.Lock()
+		now := time.Now()
 		for ip, bucket := range rl.buckets {
-			if time.Since(bucket.lastAccess) > 2*rl.windowSize {
+			// Clean up if not accessed in 2 window sizes
+			if now.Sub(bucket.lastAccess) > 2*rl.windowSize {
 				delete(rl.buckets, ip)
 			}
 		}
@@ -242,13 +249,19 @@ func (rl *SlidingWindowLogRateLimiter) Allow(ip string) bool {
 
 	// Remove timestamps older than the window
 	cutoff := now.Add(-rl.windowSize)
-	newTimestamps := make([]time.Time, 0, len(bucket.timestamps))
-	for _, ts := range bucket.timestamps {
+	// Optimize timestamp removal: find the first index to keep
+	validStartIndex := 0
+	for i, ts := range bucket.timestamps {
 		if !ts.Before(cutoff) {
-			newTimestamps = append(newTimestamps, ts)
+			validStartIndex = i
+			break
+		}
+		// If all timestamps are before cutoff, set index beyond slice
+		if i == len(bucket.timestamps)-1 && ts.Before(cutoff) {
+		    validStartIndex = len(bucket.timestamps)
 		}
 	}
-	bucket.timestamps = newTimestamps
+	bucket.timestamps = bucket.timestamps[validStartIndex:]
 
 	// Check if adding a new request would exceed the threshold
 	if len(bucket.timestamps) < rl.threshold {
@@ -257,6 +270,8 @@ func (rl *SlidingWindowLogRateLimiter) Allow(ip string) bool {
 	}
 	return false
 }
+
+// --- Sliding Window Counter Implementation ---
 
 // SlidingWindowCounter represents counters for current and previous windows
 type SlidingWindowCounter struct {
@@ -308,8 +323,10 @@ func (rl *SlidingWindowCounterRateLimiter) cleanup() {
 	for {
 		time.Sleep(5 * time.Minute)
 		rl.mu.Lock()
+		now := time.Now()
 		for ip, bucket := range rl.buckets {
-			if time.Since(bucket.lastAccess) > 2*rl.windowSize {
+			// Clean up if not accessed in 2 window sizes
+			if now.Sub(bucket.lastAccess) > 2*rl.windowSize {
 				delete(rl.buckets, ip)
 			}
 		}
@@ -325,58 +342,42 @@ func (rl *SlidingWindowCounterRateLimiter) Allow(ip string) bool {
 
 	now := time.Now()
 	bucket.lastAccess = now
-	currentWindow := now.Truncate(rl.windowSize)
+	currentWindowStart := now.Truncate(rl.windowSize)
 
-	// If we've moved to a new window, shift counts
-	if !bucket.windowStart.Equal(currentWindow) {
-		bucket.previousCount = bucket.currentCount
+	// If we've moved into a new window or further
+	if !bucket.windowStart.Equal(currentWindowStart) {
+		// Calculate how many windows have passed
+		windowsPassed := int(currentWindowStart.Sub(bucket.windowStart) / rl.windowSize)
+		if windowsPassed == 1 {
+			// Moved to the immediately next window
+			bucket.previousCount = bucket.currentCount
+		} else {
+			// Skipped one or more windows, previous count is 0
+			bucket.previousCount = 0
+		}
 		bucket.currentCount = 0
-		bucket.windowStart = currentWindow
+		bucket.windowStart = currentWindowStart
 	}
 
-	// Calculate weighted count
-	elapsed := now.Sub(bucket.windowStart).Seconds()
-	weight := (float64(rl.windowSize)/float64(time.Second) - elapsed) / (float64(rl.windowSize) / float64(time.Second))
-	weightedCount := float64(bucket.currentCount) + float64(bucket.previousCount)*weight
+	// Calculate approximate count in the sliding window
+	elapsedInCurrentWindow := now.Sub(bucket.windowStart)
+	weightPrevious := (float64(rl.windowSize) - float64(elapsedInCurrentWindow)) / float64(rl.windowSize)
+	estimatedCount := float64(bucket.previousCount)*weightPrevious + float64(bucket.currentCount)
 
 	// Check if adding a request would exceed the threshold
-	if weightedCount < float64(rl.threshold) {
+	if estimatedCount < float64(rl.threshold) {
 		bucket.currentCount++
 		return true
 	}
 	return false
 }
 
-func main() {
-	// Initialize sliding window counter rate limiter: 60s window, 60 requests threshold
-	rl := NewSlidingWindowCounterRateLimiter(60*time.Second, 6)
+// --- Helper Functions ---
 
-	// Define handlers
-	http.HandleFunc("/unlimited", unlimitedHandler)
-	http.HandleFunc("/limited", limitedHandler(rl))
-
-	// Start the server
-	addr := "127.0.0.1:8080"
-	log.Printf("Server starting on %s", addr)
-	if err := http.ListenAndServe(addr, nil); err != nil {
-		log.Fatalf("Server failed to start: %v", err)
+// min returns the smaller of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
 	}
-}
-
-// unlimitedHandler handles requests to /unlimited
-func unlimitedHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprint(w, "Unlimited! Let's Go!")
-}
-
-// limitedHandler creates a handler for /limited with rate limiting
-func limitedHandler(rl RateLimiter) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		// Get client IP (simplified; in production, handle proxies)
-		ip := r.RemoteAddr
-		if rl.Allow(ip) {
-			fmt.Fprint(w, "Limited, don't over use me!")
-		} else {
-			http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
-		}
-	}
+	return b
 }
