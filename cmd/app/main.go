@@ -23,7 +23,7 @@ func main() {
 	rl := ratelimiter.NewSlidingWindowCounterRateLimiter(60*time.Second, 6)
 
 	// Define server address
-	addr := "127.0.0.1:8080"
+	addr := ":8080"
 
 	// Start the server
 	log.Println("Initializing server...")
