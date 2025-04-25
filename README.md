@@ -85,3 +85,41 @@ To change the rate limiting algorithm or its parameters:
    }
    ```
 4.  Save the file and restart the application (`go run ./cmd/app/main.go`).
+
+## Running with Docker
+
+You can also run this application using Docker and Docker Compose.
+
+**Prerequisites:**
+
+*   [Docker](https://docs.docker.com/get-docker/)
+*   [Docker Compose](https://docs.docker.com/compose/install/)
+
+**Steps:**
+
+1.  **Build the Docker image:**
+
+    ```bash
+    docker build -t rate-limiter-app .
+    ```
+
+2.  **Run using Docker Compose:**
+
+    This command will start the rate limiter service in the background.
+
+    ```bash
+    docker-compose up -d
+    ```
+
+3.  **Access the service:**
+
+    The service will be available on your host machine at port 8088.
+
+    *   Limited endpoint: [http://localhost:8088/limited](http://localhost:8088/limited)
+    *   Unlimited endpoint: [http://localhost:8088/unlimited](http://localhost:8088/unlimited)
+
+4.  **Stop the service:**
+
+    ```bash
+    docker-compose down
+    ```
